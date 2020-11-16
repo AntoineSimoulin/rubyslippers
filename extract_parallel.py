@@ -1,6 +1,5 @@
 
 import sys
-import rapidjson as json
 
 from joblib import Parallel, delayed
 from tqdm import tqdm
@@ -14,9 +13,9 @@ def parallelize_preprocess(func, iterator, processes, progress_bar=False):
         return map(func, iterator)
     return Parallel(n_jobs=processes)(delayed(func)(line) for line in iterator)
 
-processes = 4
+processes = 20
 quiet = True
-we = WikiExtractor('en')
+we = WikiExtractor('fr')
 
 output_dir = sys.argv[1]
 
@@ -28,8 +27,12 @@ for idx, page in tqdm(enumerate(extract_pages_from_dump(sys.stdin))):
             we.extract, pages, processes, progress_bar=(not quiet)
         ):
             if wiki_page:
-                with open(output_dir + str(wiki_page['id']) +'.json', 'w') as fout:
-                    json.dump(wiki_page, fout)
+                if wiki_page['text']:
+                    with open(output_dir + 'dump.txt', "a") as f:
+                        for s in wiki_page['text']:
+                            f.write(s + '\n')
+                        f.write('\n')
+
         pages = []
 
 if len(pages) > 0:
@@ -37,5 +40,8 @@ if len(pages) > 0:
         we.extract, pages, processes, progress_bar=(not quiet)
     ):
         if wiki_page:
-            with open(output_dir + str(wiki_page['id']) +'.json', 'w') as fout:
-                json.dump(wiki_page, fout)
+            if wiki_page['text']:
+                with open(output_dir + 'dump.txt', "a") as f:
+                    for s in wiki_page['text']:
+                        f.write(s + '\n')
+                    f.write('\n')
