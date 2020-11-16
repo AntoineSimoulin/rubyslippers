@@ -1,30 +1,33 @@
-
-import re
+# import re
+import regex as re
 import urllib.parse
 from itertools import chain
 
 from rubyslippers.utils import get_wiki_document_url
 from rubyslippers.utils import unescape_xml
 
+from nltk.tokenize import sent_tokenize
+
+
 class WikiExtractor:
     GARBAGE_TAGS = ('ref', 'gallery', 'timeline', 'noinclude', 'pre', 'table',
-        'tr', 'td', 'ul', 'li', 'ol', 'dl', 'dt', 'dd', 'menu', 'dir')
+                    'tr', 'td', 'ul', 'li', 'ol', 'dl', 'dt', 'dd', 'menu', 'dir')
 
     WRAPPER_TAGS = ('nowiki', 'cite', 'source', 'hiero', 'div', 'font', 'span',
-        'strong', 'strike', 'blockquote', 'tt', 'var', 'sup', 'sub', 'big',
-        'small', 'center', 'h1', 'h2', 'h3', 'em', 'b', 'i', 'u', 'a', 's', 'p')
+                    'strong', 'strike', 'blockquote', 'tt', 'var', 'sup', 'sub', 'big',
+                    'small', 'center', 'h1', 'h2', 'h3', 'em', 'b', 'i', 'u', 'a', 's', 'p')
 
     SINGLE_TAGS = ('references', 'ref', 'img', 'br', 'hr', 'li', 'dt', 'dd')
 
-    PLACEHOLDER_TAGS = {'math':'formula', 'code':'codice'}
+    PLACEHOLDER_TAGS = {'math': 'formula', 'code': 'codice'}
 
     PROJECT_NAMESPACES = ('wikipedia', 'mediawiki', 'wikiquote', 'wikibooks',
-        'wikisource', 'wiktionary', 'wikispecies', 'wikinews', 'wikiversita',
-        'commons')
+                          'wikisource', 'wiktionary', 'wikispecies', 'wikinews', 'wikiversita',
+                          'commons')
 
     GARBAGE_NAMESPACES = ('immagine', 'image',
-        'categoria', 'category', # Maybe this needs to be disabled.
-        'file')
+                          'categoria', 'category',  # Maybe this needs to be disabled.
+                          'file')
 
     # Recognize HTML comments.
     COMMENT_PATTERN = [re.compile(r'<!--.*?-->', re.DOTALL)]
@@ -59,14 +62,25 @@ class WikiExtractor:
         PLACEHOLDER_TAG_PATTERNS.append((pattern, replacement))
 
     # Recognizes tables and templates.
-    TABLE_PATTERN = re.compile(r'\{[^{]*?\}', re.DOTALL)
+    RECURSIVE_TABLE_PATTERN = re.compile(r'(?<table>\{(?:[^{}]+|(?&table))*\})', re.DOTALL | re.IGNORECASE)
+    TABLE_PATTERN = re.compile(r'([^|]*?)\|([^}]*)|(formatnum):([^}]*)', re.DOTALL | re.IGNORECASE)
 
     # Recognize wikilinks.
-    GOOD_WIKILINK_PATTERN = re.compile(r'\[\[[^[]*?\]\]', re.DOTALL)
+    GOOD_WIKILINK_PATTERN = re.compile(r'(?<link>\[(?:[^\[\]]{1,1000}+|(?&link))*\])', re.DOTALL)
     BAD_LEFT_WIKILINK_PATTERN = re.compile(r'\[[^[]*?\]\]', re.DOTALL)
     BAD_RIGHT_WIKILINK_PATTERN = re.compile(r'\[\[[^[]*?\]', re.DOTALL)
 
+    INFO_TYPE = ['s-', 'lang', 'date de naissance', 'unité',
+                 'coord', 'p.', 'date-', 'nombre', 'nobr', 'msapi',
+                 'citation', 'api', 'date de décès', 'durée', 'date',
+                 'date de mort', '-millénaire', 'math']
+
+    LINK_PATTERN = re.compile(r'<a href=\"([^>]*)\"[^>]*>(.*?)<\/a>', re.DOTALL | re.IGNORECASE)  # <a href=\"([^>]*)\"[^>]*>([^>]*(?R)?)<\/a>
+    BAD_LINK_PATTERN = re.compile(r'<a href=\"([^>]*)\"[^>]*>', re.DOTALL | re.IGNORECASE)
+    # RESIDUAL_HTML_BLOCKS = re.compile(r'\<(?!\/)(gallery|comment|imagemap) ?.{0,100}?\>(.|\n){1,1000}?\<\/(\1)\>', re.DOTALL | re.IGNORECASE)  # imagemap, gallery mode, comments ...
+
     HTTP_LINK_PATTERN = re.compile(r'\[http.*?\]', re.DOTALL | re.IGNORECASE)
+    RESIDUAL_FILES = re.compile(r'Fichier:.*', re.DOTALL | re.IGNORECASE)
 
     # Recognizes apostrophes that precede bold and italics.
     APOSTROPHE_BOLD_PATTERN = re.compile(r"\w'('''[^\s'][^']*?[^\s']''')[^']", re.DOTALL)
@@ -89,7 +103,10 @@ class WikiExtractor:
         SINGLE_TAG_PATTERNS
     ]
 
-    def __init__(self, lang='en'):
+    PATTERN_TOKENS = re.compile(
+        r"(\->|(?::\)|:-\)|:\(|:-\(|;\);-\)|:-O|8-|:P|:D|:\||:S|:\$|:@|8o\||\+o\(|\(H\)|\(C\)|\(\?\))|(?:[\d.,]+)|([^\s\w0-9])\2*|(?:[\w0-9\.\-]+['’]?)(?<!\.))")
+
+    def __init__(self, lang='fr'):
         self.prefix = f'http://{lang}.wikipedia.org/wiki/'
 
     def _handle_wikilink(self, wikilink):
@@ -110,7 +127,7 @@ class WikiExtractor:
             if len(tokens) > 1:
                 article_title = tokens[-2].strip()
             else:
-                 article_title = link_text
+                article_title = link_text
             return article_title, link_text
 
         if tokens[0].strip().lower() in self.GARBAGE_NAMESPACES:
@@ -136,12 +153,54 @@ class WikiExtractor:
         wiki_url = get_wiki_document_url(document_title, '')
         return fr'<a href="{wiki_url}">{link_text}</a>'
 
-
     def _handle_unicode(self, entity):
         numeric_code = int(entity[2:-1])
         if numeric_code >= 0x10000:
             return ''
         return chr(numeric_code)
+
+    def replace_tables(self, match):
+
+        if match.group(1):
+            match_type = match.group(1)
+            value = match.group(2)
+        else:
+            match_type = match.group(3)
+            value = match.group(4)
+
+        if match_type is None:
+            return ''
+        elif match_type.lower() in self.INFO_TYPE:
+            return re.sub('\|', ' ', value)
+        elif len(match_type.lower().split()) and (match_type.lower().split()[-1] in self.INFO_TYPE):
+            return re.sub('\|', ' ', value)
+        elif match_type.lower() in 'date':
+            return re.sub('.*?\|texte=(.*)', r'\1', value)
+        else:
+            return ''
+
+    def recursive_replace_tables(self, match, depth=0):
+        match = match.group('table').rstrip('}').lstrip('{')
+        if self.RECURSIVE_TABLE_PATTERN.search(match) and depth < 5:
+            match = self.RECURSIVE_TABLE_PATTERN.sub(lambda x: self.recursive_replace_tables(x, depth + 1),
+                                                     match)
+        match = self.TABLE_PATTERN.sub(self.replace_tables, match)
+        return match
+
+    def replace_wikilinks(self, match):
+        wikilink = match.group()
+        if re.match(r'\[{1,2}Fichier\:', wikilink):
+            return ''
+        document_title, link_text = self._handle_wikilink(wikilink[2:-2])
+        anchor_tag = self._get_anchor_tag(document_title, link_text)
+        return anchor_tag
+
+    def recursive_replace_wikilinks(self, text, depth=0):
+        """Handle good wikilinks (well formatted; two nesting levels)"""
+        text = re.sub(self.GOOD_WIKILINK_PATTERN, self.replace_wikilinks, text)
+        if self.GOOD_WIKILINK_PATTERN.search(text) and depth < 10:
+            text = self.recursive_replace_wikilinks(text, depth + 1)
+        return text
 
     def clean(self, text):
         # Unescape greater/lesser than symbols.
@@ -161,21 +220,8 @@ class WikiExtractor:
         text = text.replace('{{end box}}', '}')
         text = text.replace('{{', '{').replace('}}', '}')
         text = text.replace('{|', '{').replace('|}', '}')
-        # For some reason, applies the table patterns 3 times.
-        text = self.TABLE_PATTERN.sub('', text)
-        text = self.TABLE_PATTERN.sub('', text)
-        text = self.TABLE_PATTERN.sub('', text)
-
-        # Handle good wikilinks (well formatted; two nesting levels)
-        for match in self.GOOD_WIKILINK_PATTERN.finditer(text):
-            wikilink = match.group()
-            document_title, link_text = self._handle_wikilink(wikilink[2:-2])
-            anchor_tag = self._get_anchor_tag(document_title, link_text)
-            text = text.replace(wikilink, anchor_tag)
-
-        for match in self.GOOD_WIKILINK_PATTERN.finditer(text):
-            wikilink = match.group()
-            text = text.replace(wikilink, self._handle_wikilink(wikilink[2:-2])[1])
+        text = self.RECURSIVE_TABLE_PATTERN.sub(self.recursive_replace_tables, text)
+        text = self.recursive_replace_wikilinks(text)
 
         # Handles bad wikilinks (poorly formatted)
         for match in self.BAD_LEFT_WIKILINK_PATTERN.finditer(text):
@@ -239,10 +285,13 @@ class WikiExtractor:
                     title = fr'{title}.'
                 page = [title]
             # Handles paragraph titles.
-            elif line.startswith('=='):
+            elif re.match(r'={2,}', line): # line.startswith('=='):
                 if len(paragraph) > 1:
                     page.extend(paragraph)
-                title = line[2:-2]
+                if re.findall(r'={2,} *([^=]*)', line):
+                    title = re.findall(r'={2,} *([^=]*)', line)[0].strip()
+                else:
+                    title = line[2:-2]
                 if title and title[-1] not in '!?':
                     title = fr'{title}.'
                 paragraph = [title]
@@ -271,14 +320,26 @@ class WikiExtractor:
                 paragraph.append(line)
 
         # Skip title only paragraph.
-        if len(paragraph) > 1:
+        if len(paragraph) >= 1:
             page.extend(paragraph)
 
         # Skip title only page.
-        elif len(page) == 1:
+        elif len(page) == 0:
             return ''
 
         return '\n'.join(page)
+
+    def sentence_tokenize(self, text):
+        sentences = sent_tokenize(text)
+        # sentences = re.split(self.PATTERN_SENTENCES, text)
+        return sentences
+
+    def word_tokenize(self, text):
+        if not isinstance(text, list):
+            text = [text]
+        tokens = [[groups[0] for groups in re.findall(self.PATTERN_TOKENS, s)] for s in text]
+        tokens = [' '.join([t.strip() for t in s]) for s in tokens]
+        return tokens
 
     def parse(self, page):
         wiki_id = None
@@ -286,6 +347,7 @@ class WikiExtractor:
         wiki_text = []
         wiki_infoboxes = []
         this_infobox = []
+        residual_html = []
 
         # `page` is the XML <page> ... </page>
         for line in page:
@@ -305,10 +367,11 @@ class WikiExtractor:
                 text = '++{title}++'
                 continue
             # Beginning of the page text.
-            elif line.startswith('<text'):
+            elif line.strip().startswith('<text'):
                 if line.endswith('</text>'):
                     break
-                line = line[27:]
+                # line = line[27:]
+                line = re.sub(r"^<text.*?>", '', line)
                 if not line.strip():
                     continue
             # End of the page text.
@@ -317,26 +380,32 @@ class WikiExtractor:
                 if not line.strip():
                     continue
 
-            # Superfluous information.
-            elif line[0] == '<':
-                continue
-
             # Paragraph title.
             elif line[0] == '=':
-                para_title = line.strip('= ')
-                line = f'=={para_title}=='
+                continue
 
             # Keeps track of infoboxes.
             if this_infobox == [] and line.startswith('{{Infobox '):
                 this_infobox.append(line)
             elif this_infobox and line.startswith('|'):
                 this_infobox.append(line)
-            elif this_infobox and line ==  '}}':
+            elif this_infobox and line == '}}':
                 this_infobox.append(line)
                 # Add infobox to this page.
                 wiki_infoboxes.append('\n'.join(this_infobox))
                 # Pop out the storage for `this_infobox`
                 this_infobox = []
+
+            # Keeps track of residual html
+            if re.match(r'(?:\<|&lt;)(?!\/)(gallery|comment|imagemap) ?.{0,100}?(?:\>|&gt;)', line.strip()):
+                residual_html.append(line)
+            if residual_html:
+                if re.search(r'(?:\<|&lt;)\/(gallery|comment|imagemap) ?.{0,100}?(?:\>|&gt;)', line.strip()):
+                    residual_html = []
+                continue
+            # Superfluous information.
+            if line[0] == '<':
+                continue
 
             wiki_text.append(line)
 
@@ -344,7 +413,10 @@ class WikiExtractor:
             return wiki_id, wiki_url, wiki_text, wiki_infoboxes
 
     def extract(self, page):
+        # start = time.time()
         # Call the parsing function.
+        # remove residual html
+
         parsed_page = self.parse(page)
         if parsed_page:
             wiki_id, wiki_url, wiki_text, wiki_infoboxes = parsed_page
@@ -360,6 +432,7 @@ class WikiExtractor:
 
             # Convert page texts to single string.
             wiki_text = self.compact(self.clean('\n'.join(wiki_text)))
+
             # Extract the categories.
             for match in re.finditer(r"\[\[Category:(.*)\]\]", wiki_text):
                 for cat in match.groups(0):
@@ -368,11 +441,21 @@ class WikiExtractor:
             # Extract the annotations.
             # Remove the <a href="..."> ... </a>
             wiki_text, annotations = self.annotate(wiki_text)
+
+            wiki_text = self.sentence_tokenize(wiki_text)
+            wiki_text = [s for s in wiki_text if not self.RESIDUAL_FILES.search(s)]
+            # wiki_text = self.word_tokenize(wiki_text)
             # Put everything into a serializable dictionary.
-            wiki_page =  {'id': wiki_id, 'url': wiki_url, 'text': wiki_text,
-                          'categories': wiki_cats, 'infobox_types': infobox_types,
-                          'annotations': annotations}
+            wiki_page = {'id': wiki_id, 'url': wiki_url, 'text': wiki_text,
+                         'categories': wiki_cats, 'infobox_types': infobox_types,
+                         'annotations': annotations}
             return wiki_page
+
+    def replace_links(self, text, depth=0):
+        text = re.sub(self.LINK_PATTERN, r'\2', text)
+        if re.search(self.LINK_PATTERN, text) and depth < 5:
+            text = self.replace_links(text, depth=depth+1)
+        return text
 
     def annotate(self, text, keep_anchors=False):
         # Initialize an empty annotations list.
@@ -385,20 +468,19 @@ class WikiExtractor:
 
         # As a first step, find all links in the article, save their positions
         # into the annotations object
-        ms = re.finditer('<a href="([^"]+)">([^>]+)</a>', text)
+        ms = re.finditer('<a href=\"([^\"]+)\">([^>]+)<\/a>', text)
 
         for m in ms:
             if urllib.parse.quote("#") not in m.group(1) or keep_anchors:
                 annotations.append({
-                    "uri"    :   m.group(1),
-                    "surface_form" :   m.group(2),
-                    "offset"  :   m.start() - deltaStringLength
+                    "uri": m.group(1),
+                    "surface_form": m.group(2),
+                    "offset": m.start() - deltaStringLength
                 })
 
             deltaStringLength += len(m.group(0)) - len(m.group(2))
 
-        #As a second step, replace all links in the article by their label
-        text = re.sub('<a href="([^"]+)">([^>]+)</a>',
-                lambda m: m.group(2), text)
-
+        # As a second step, replace all links in the article by their label
+        text = self.replace_links(text)
+        text = re.sub(self.BAD_LINK_PATTERN, '', text)
         return text, annotations
