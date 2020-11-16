@@ -12,7 +12,11 @@ we = WikiExtractor('en')
 output_dir = sys.argv[1]
 
 for idx, page in tqdm(enumerate(extract_pages_from_dump(sys.stdin))):
+
     wiki_page = we.extract(page)
     if wiki_page:
-        with open(output_dir + str(wiki_page['id']) +'.json', 'w') as fout:
-            json.dump(wiki_page, fout)
+        if wiki_page['text']:
+            with open(output_dir + 'dump.txt', "a") as f:
+                for s in wiki_page['text']:
+                    f.write(s + '\n')
+                f.write('\n')
